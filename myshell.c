@@ -7,6 +7,7 @@
 #include <sys/param.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <sys/wait.h>
 
 #define IS_EQUAL_STR(str1, str2) (strlen(str1) == strlen(str2) && strcmp(str1, str2) == 0)
 
@@ -78,7 +79,7 @@ void display_prompt(const char **env)
     free(pwd);
 }
 
-void exec_command(char const *command)
+void exec_command(char const *command, const char **env)
 {
     if (command != NULL)
     {
@@ -96,7 +97,7 @@ void exec_command(char const *command)
         {
             char *name = strtok(command, " ");
             const size_t MAX_COUNT_ARG = 20;
-            char *arguments[MAX_COUNT_ARG + 1];
+            char **arguments = (char **)calloc(MAX_COUNT_ARG + 1, sizeof(char*));
             size_t index = 0;
 
             char *token = strtok(NULL, " ");
@@ -116,6 +117,16 @@ void exec_command(char const *command)
                 else if (index == 1)
                 {
                     char *path = arguments[0];
+                    if (path[0] == '~')
+                    {
+                        const char *home_path = get_env_value(env, "HOME");
+                        size_t len_path = strlen(path + 1) + strlen(home_path) + 1;
+                        char *buff_path = (char *)calloc(len_path, 1);
+                        strcat(buff_path, home_path);
+                        strcat(buff_path, path + 1);
+                        path = buff_path;
+                    }
+
                     int res = chdir(path);
 
                     if (res != -1)
@@ -136,6 +147,37 @@ void exec_command(char const *command)
                     {
                         printf("cd: Not a directory\n");
                     }
+                    if (path!=arguments[0])
+                    {
+                         free(path);
+                    }             
+                   free(arguments);
+                }
+            }
+            else if (IS_EQUAL_STR(name, "ls"))
+            {
+                pid_t pid = fork();
+                if (pid == 0)
+                {
+                    switch (index)
+                    {
+                    case 0:
+                        execl("/bin/ls", "/bin/ls", "./", arguments[index]);
+                        break;
+                    case 1:
+                        execl("/bin/ls", "/bin/ls", arguments[0], arguments[index]);
+                        break;
+                    case 2:
+                        execl("/bin/ls", "/bin/ls", arguments[0], arguments[1], arguments[index]);
+                        break;
+                    default:
+                        break;
+                    }
+                }
+                else
+                {
+                    int stat_lock;
+                    wait(&stat_lock);
                 }
             }
             else
@@ -175,7 +217,7 @@ int main(int argc, char const *argv[], char const *env[])
         display_prompt(env);
         clear_buffer(buffer, BUFF_SIZE);
         read(STDIN_FILENO, buffer, 255);
-        exec_command(trim(buffer));
+        exec_command(trim(buffer), env);
     }
 
     return 0;
