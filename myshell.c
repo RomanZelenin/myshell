@@ -1,6 +1,5 @@
 #include <unistd.h>
 #include <stdio.h>
-#include <pty.h>
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,6 +7,12 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <sys/wait.h>
+#include <dirent.h>
+#include <readline/readline.h>
+
+#define OLD_STDOUT 5
+
+static char *HOME_PATH_SYM = "~";
 
 typedef enum bool
 {
@@ -24,7 +29,7 @@ void clear_buffer(char *buff, size_t n)
     }
 }
 
-char const *trim(char *str)
+char *trim(char *str)
 {
     int s = 0;
     while (s < strlen(str) - 1 && (str[s] == ' '))
@@ -75,8 +80,56 @@ void display_prompt()
     free(pwd);
 }
 
-void exec_command(char const *command, const char **env)
+char *find_command(char *command)
 {
+    char *result = NULL;
+    const char *PATH = getenv("PATH");
+    char *paths = malloc(strlen(PATH));
+    strcpy(paths, PATH);
+
+    if (paths != NULL)
+    {
+        char *path = strtok(paths, ":");
+        while (path != NULL && result == NULL)
+        {
+            DIR *dir = opendir(path);
+            if (dir != NULL)
+            {
+                struct dirent *entry = readdir(dir);
+                while (entry != NULL)
+                {
+                    if (strcmp(command, entry->d_name) == 0)
+                    {
+                        char *result_path = (char *)malloc(strlen(entry->d_name) + strlen(command) + 2);
+                        strcpy(result_path, path);
+                        if (path[strlen(path) - 1] != '/')
+                        {
+                            result_path[strlen(path)] = '/';
+                            result_path[strlen(path) + 1] = '\0';
+                        }
+                        strcat(result_path, command);
+                        result = result_path;
+                        break;
+                    }
+                    entry = readdir(dir);
+                }
+                closedir(dir);
+            }
+            path = strtok(NULL, ":");
+        }
+        free(paths);
+    }
+    return result;
+}
+
+char *get_next_command()
+{
+    return NULL;
+}
+
+void exec_command(char *command)
+{
+    command = trim(command);
     if (command != NULL)
     {
         if (strcmp(command, "exit") == 0)
@@ -91,12 +144,13 @@ void exec_command(char const *command, const char **env)
         }
         else
         {
-            char *name = strtok(command, " ");
             const size_t MAX_COUNT_ARG = 20;
             char **arguments = (char **)calloc(MAX_COUNT_ARG + 1, sizeof(char *));
-            size_t index = 0;
+            arguments[0] = strtok(command, " ");
+            char *command_name = arguments[0];
 
             char *token = strtok(NULL, " ");
+            size_t index = 1;
             while (token && index < MAX_COUNT_ARG)
             {
                 arguments[index++] = token;
@@ -104,16 +158,18 @@ void exec_command(char const *command, const char **env)
             }
             arguments[index] = NULL;
 
-            if (strcmp(name, "cd") == 0)
+            if (strcmp(command_name, "cd") == 0)
             {
-                if (index > 1)
+                const char *OLDPWD = getenv("OLD_PWD");
+                if (index > 2)
                 {
                     printf("cd: too many arguments\n");
                 }
-                else if (index == 1)
+                else if (index >= 1 && index <= 2)
                 {
-                    char *path = arguments[0];
-                    if (path[0] == '~')
+                    const char *path = index == 1 ? HOME_PATH_SYM : arguments[1];
+
+                    if (path == HOME_PATH_SYM || path[0] == '~')
                     {
                         const char *home_path = getenv("HOME");
                         size_t len_path = strlen(path + 1) + strlen(home_path) + 1;
@@ -122,63 +178,85 @@ void exec_command(char const *command, const char **env)
                         strcat(buff_path, path + 1);
                         path = buff_path;
                     }
-
-                    int res = chdir(path);
-
-                    if (res != -1)
+                    else if (index == 2 && strlen(arguments[1]) == 1 && arguments[1][0] == '-')
                     {
-                        switch (res)
+                        if (OLDPWD != NULL)
                         {
-                        case ENOTDIR:
-                            printf("cd: Not a directory\n");
-                            break;
-                        case ENOENT:
-                            printf("No such file or directory\n");
-                            break;
-                        default:
-                            break;
+                            path = OLDPWD;
+                        }
+                        else
+                        {
+                            printf("cd: OLD_PWD not set\n");
+                            path = NULL;
                         }
                     }
-                    else
+
+                    if (path != NULL)
                     {
-                        printf("cd: Not a directory\n");
+                        char *cwd = getcwd(NULL, 0);
+                        char *tmp = calloc(strlen(cwd) + strlen("OLD_PWD=") + 1, 1);
+                        strcat(tmp, "OLD_PWD=");
+                        strcat(tmp, cwd);
+                        putenv(tmp);
+
+                        int res = chdir(path);
+                        if (res != -1)
+                        {
+                            switch (res)
+                            {
+                            case ENOTDIR:
+                                printf("cd: Not a directory\n");
+                                break;
+                            case ENOENT:
+                                printf("No such file or directory\n");
+                                break;
+                            default:
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            printf("cd: Not a directory\n");
+                        }
+                        if (path != arguments[1] && path != HOME_PATH_SYM && path != OLDPWD)
+                        {
+                            free(path);
+                        }
                     }
-                    if (path != arguments[0])
-                    {
-                        free(path);
-                    }
+
                     free(arguments);
-                }
-            }
-            else if (strcmp(name, "ls") == 0)
-            {
-                pid_t pid = fork();
-                if (pid == 0)
-                {
-                    switch (index)
-                    {
-                    case 0:
-                        execl("/bin/ls", "/bin/ls", "./", arguments[index]);
-                        break;
-                    case 1:
-                        execl("/bin/ls", "/bin/ls", arguments[0], arguments[index]);
-                        break;
-                    case 2:
-                        execl("/bin/ls", "/bin/ls", arguments[0], arguments[1], arguments[index]);
-                        break;
-                    default:
-                        break;
-                    }
-                }
-                else
-                {
-                    int stat_lock;
-                    wait(&stat_lock);
                 }
             }
             else
             {
-                printf("%s: command not found\n", command);
+                while (command_name != NULL)
+                {
+                    char *command_path = find_command(command_name);
+                    if (command_path != NULL)
+                    {
+                        pid_t pid = fork();
+                        if (pid == 0)
+                        {
+                            /* dup2(STDOUT_FILENO, OLD_STDOUT);
+                            int f = open("res.txt", O_WRONLY | O_APPEND | O_CREAT, S_IRWXU);
+                            dup2(f, STDOUT_FILENO); */
+                            execv(command_path, arguments);
+                        }
+                        else
+                        {
+                            int stat_lock;
+                            wait(&stat_lock);
+                            free(command_path);
+                            // dup2(OLD_STDOUT, STDOUT_FILENO);
+                        }
+                    }
+                    else
+                    {
+                        printf("%s: command not found\n", command_name);
+                    }
+
+                    command_name = get_next_command();
+                }
             }
         }
     }
@@ -194,8 +272,10 @@ int main(int argc, char const *argv[], char const *env[])
     {
         display_prompt();
         clear_buffer(buffer, BUFF_SIZE);
+        // char* input = readline(NULL);
         read(STDIN_FILENO, buffer, 255);
-        exec_command(trim(buffer), env);
+        exec_command(buffer);
+        // free(input);
     }
 
     return 0;
